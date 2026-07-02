@@ -1,2 +1,9 @@
-# sprite2d
-KAMI clj-wgsl migration Phase 4 home (ADR-2607010930) — scaffold, Wave-2 port lands here
+# kotoba-lang/sprite2d
+
+Kotoba runtime package for `kotoba.sprite2d`.
+
+## Test
+
+```sh
+clojure -M:test
+```
