@@ -1,3 +1,5 @@
+> **ADR-2607102200 addendum 5:** also hosts `kami.sprite2d.layout` (SSoT for webgpu/scene2d).
+
 # kotoba-lang/sprite2d
 
 Kotoba runtime package for `kotoba.sprite2d`.
