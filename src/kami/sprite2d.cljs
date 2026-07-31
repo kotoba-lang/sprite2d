@@ -4,10 +4,25 @@
      [[:ellipse {:dx :dy :rx :ry :fill}]
       [:circle  {:dx :dy :r :fill}]
       [:rect    {:dx :dy :w :h :fill}]
-      [:arc     {:dx :dy :r :a0 :a1 :w :stroke}]]   ;; stroked arc — crescents, brims
+      [:arc     {:dx :dy :r :a0 :a1 :w :stroke}]    ;; stroked arc — crescents, brims
+      [:image   {:dx :dy :w :h :src :alpha}]]       ;; raster art (see below)
    The renderer draws a top-down view: sky→ground wash + scattered trees + entity sprites,
    the camera centred on the player. No WebGPU — this is the canvas-2D twin for 2D games,
    so the characters and title art are data you can read and fork like everything else.
+
+   ## :image — raster art as data
+
+   The four vector primitives above can only express flat blobs, which is a hard ceiling on
+   how a 2D game can look: every game built on this painter reads as the same coloured
+   circles regardless of its mechanics. `:image` lifts that ceiling by letting a sprite
+   name a picture — including one a generation backend just produced — while keeping the
+   sprite a plain EDN vector you can still read, diff and fork.
+
+   Loading is asynchronous and the painter stays synchronous: the first frame that mentions
+   an unseen `:src` kicks off a load and draws NOTHING for that part; later frames draw it
+   once decoded. So a game degrades to its vector parts while art streams in, and never
+   blocks the loop. A failed load is remembered as failed and never retried, so a broken
+   URL costs one request, not one per frame.
 
    The *layout* (which sprite, where, in what order) is a pure draw list in
    kami.sprite2d.layout — CLJ-tested on the JVM (camera, W/S orientation, variant swap,
@@ -17,6 +32,40 @@
 (defn- css [c] (str "rgba(" (js/Math.round (* 255 (nth c 0))) ","
                     (js/Math.round (* 255 (nth c 1))) ","
                     (js/Math.round (* 255 (nth c 2))) "," (nth c 3 1) ")"))
+
+;; ── :image cache ─────────────────────────────────────────────────────────────────────────
+;; src -> {:state :loading|:ready|:failed, :img <HTMLImageElement>}. `defonce` so a hot
+;; reload doesn't re-fetch every asset, and so the cache is shared across every sprite that
+;; names the same art.
+(defonce ^:private images* (atom {}))
+
+(defn- load-image!
+  "Start loading `src` if it hasn't been seen. Returns nothing — callers read `images*`.
+   Registered as :loading BEFORE the element is wired up, so a src mentioned by many parts
+   in the same frame is fetched once."
+  [src]
+  (when-not (contains? @images* src)
+    (swap! images* assoc src {:state :loading :img nil})
+    (let [el (js/Image.)]
+      ;; anonymous CORS so a cross-origin artifact (e.g. a generation backend's CDN) can be
+      ;; drawn without tainting the canvas — a tainted canvas would break the visual-capture
+      ;; gate's readback, not just this draw.
+      (set! (.-crossOrigin el) "anonymous")
+      (set! (.-onload el) (fn [] (swap! images* assoc src {:state :ready :img el})))
+      (set! (.-onerror el) (fn [] (swap! images* assoc src {:state :failed :img nil})))
+      (set! (.-src el) src))))
+
+(defn preload-images!
+  "Warm the cache for a seq of srcs (e.g. every :image in a scene) so the first frame that
+   needs them can already draw. Optional — `:image` loads on demand regardless."
+  [srcs]
+  (doseq [s srcs :when (string? s)] (load-image! s)))
+
+(defn image-states
+  "src -> :loading|:ready|:failed for everything the painter has been asked to draw.
+   Exposed so a loading screen / test can tell 'art still streaming' from 'art broken'."
+  []
+  (into {} (map (fn [[k v]] [k (:state v)])) @images*))
 
 (defn- draw-shape!
   "Draw one EDN primitive at its :dx/:dy within the sprite (no animation)."
@@ -31,6 +80,25 @@
     :arc     (do (set! (.-strokeStyle ctx) (css (:stroke o))) (set! (.-lineWidth ctx) (:w o 8))
                  (set! (.-lineCap ctx) "round")
                  (.beginPath ctx) (.arc ctx (:dx o 0) (:dy o 0) (:r o 10) (:a0 o 0) (:a1 o js/Math.PI)) (.stroke ctx))
+    ;; Centred on :dx/:dy like :rect, so swapping a placeholder rect for real art doesn't
+    ;; move it. Nothing is drawn until the load resolves (see the ns docstring); a failed
+    ;; src simply stays invisible rather than throwing every frame.
+    :image   (let [src (:src o)]
+               (when (string? src)
+                 (load-image! src)
+                 (let [{:keys [state img]} (get @images* src)]
+                   (when (= :ready state)
+                     (let [w (:w o 100) h (:h o 100)
+                           a (:alpha o 1)
+                           prev (.-globalAlpha ctx)]
+                       (when (not= a 1) (set! (.-globalAlpha ctx) a))
+                       ;; a decoded-but-zero-sized image still throws on drawImage in some
+                       ;; engines; guard rather than kill the frame for every later part.
+                       (try
+                         (.drawImage ctx img (- (:dx o 0) (/ w 2)) (- (:dy o 0) (/ h 2)) w h)
+                         (catch :default _
+                           (swap! images* assoc src {:state :failed :img nil})))
+                       (when (not= a 1) (set! (.-globalAlpha ctx) prev)))))))
     nil))
 
 (defn prim!
