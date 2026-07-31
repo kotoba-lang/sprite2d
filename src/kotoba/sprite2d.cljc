@@ -8,4 +8,7 @@
      (def prim!          impl/prim!)
      (def draw-sprite!   impl/draw-sprite!)
      (def draw-2d!       impl/draw-2d!)
-     (def draw-portrait! impl/draw-portrait!)))
+     (def draw-portrait! impl/draw-portrait!)
+     ;; :image support — consumers reach the cache through this facade, not kami.* directly.
+     (def preload-images! impl/preload-images!)
+     (def image-states    impl/image-states)))
