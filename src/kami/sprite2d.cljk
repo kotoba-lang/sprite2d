@@ -5,7 +5,14 @@
       [:circle  {:dx :dy :r :fill}]
       [:rect    {:dx :dy :w :h :fill}]
       [:arc     {:dx :dy :r :a0 :a1 :w :stroke}]    ;; stroked arc — crescents, brims
-      [:image   {:dx :dy :w :h :src :alpha}]]       ;; raster art (see below)
+      [:image   {:dx :dy :w :h :src :alpha}]        ;; raster art (see below)
+      [:poly    {:dx :dy :pts [[x y] …] :fill :stroke :w}]   ;; closed polygon
+      [:line    {:dx :dy :pts [[x y] …] :stroke :w}]         ;; open polyline (never filled)
+      [:path    {:dx :dy :d \"M0 0 Q…Z\" :fill :stroke :w}]]   ;; SVG path data, parsed once
+   :circle / :ellipse also accept :stroke + :w (outline; fill-only parts draw exactly as
+   before), :ellipse accepts :rot, and every part accepts :alpha. `:anim` adds
+   {:squash [amp freq]} (vertical scale) and {:blink [period dur]} (closed for `dur` of every
+   `period` seconds). `draw-sprite!` takes an opts map: {:shadow? false :rot r}.
    The renderer draws a top-down view: sky→ground wash + scattered trees + entity sprites,
    the camera centred on the player. No WebGPU — this is the canvas-2D twin for 2D games,
    so the characters and title art are data you can read and fork like everything else.
@@ -67,8 +74,69 @@
   []
   (into {} (map (fn [[k v]] [k (:state v)])) @images*))
 
+(declare draw-shape-v1!)
+
+(defn- paint!
+  "Fill and/or stroke the current path from a part's :fill / :stroke / :w. A part names
+   neither → nothing is painted (not a silent default colour)."
+  [ctx o]
+  (when-let [f (:fill o)] (set! (.-fillStyle ctx) (css f)) (.fill ctx))
+  (when-let [s (:stroke o)]
+    (set! (.-strokeStyle ctx) (css s)) (set! (.-lineWidth ctx) (:w o 4))
+    (set! (.-lineJoin ctx) "round") (set! (.-lineCap ctx) "round")
+    (.stroke ctx)))
+
+(defn- trace-pts!
+  "moveTo/lineTo through [[x y] …], offset by the part's :dx/:dy."
+  [ctx o]
+  (let [dx (:dx o 0) dy (:dy o 0)]
+    (.beginPath ctx)
+    (doseq [[i [x y]] (map-indexed vector (:pts o))]
+      (if (zero? i) (.moveTo ctx (+ dx x) (+ dy y)) (.lineTo ctx (+ dx x) (+ dy y))))))
+
+;; Path2D objects parsed from an SVG path string, memoised by the string: a sprite is data
+;; that is drawn every frame, and re-parsing the same `d` sixty times a second is waste.
+(defonce ^:private paths* (atom {}))
+(defn- path2d [d]
+  (or (get @paths* d)
+      (let [p (js/Path2D. d)] (swap! paths* assoc d p) p)))
+
 (defn- draw-shape!
-  "Draw one EDN primitive at its :dx/:dy within the sprite (no animation)."
+  "Draw one EDN primitive at its :dx/:dy within the sprite (no animation).
+   :circle / :ellipse also take an optional :stroke + :w (outline). Every part takes an
+   optional :alpha."
+  [ctx kind o]
+  (let [a (:alpha o)]
+    (when a (.save ctx) (set! (.-globalAlpha ctx) (* a (.-globalAlpha ctx))))
+    (case kind
+    ;; outlined circle / ellipse: only when the part asks for a :stroke — a fill-only part
+    ;; takes the original v1 branch below, byte-for-byte the same canvas calls as before
+    (:circle :ellipse)
+    (if (:stroke o)
+      (do (.beginPath ctx)
+          (if (= kind :circle)
+            (.arc ctx (:dx o 0) (:dy o 0) (:r o 10) 0 (* 2 js/Math.PI))
+            (.ellipse ctx (:dx o 0) (:dy o 0) (:rx o 10) (:ry o 10) (:rot o 0) 0 (* 2 js/Math.PI)))
+          (paint! ctx o))
+      (draw-shape-v1! ctx kind o))
+    ;; closed polygon through :pts — ears, masks, horns, gates
+    :poly    (do (trace-pts! ctx o) (.closePath ctx) (paint! ctx o))
+    ;; open polyline through :pts — strokes, whiskers, markings
+    :line    (do (trace-pts! ctx o) (paint! ctx (dissoc o :fill)))
+    ;; SVG path data (`M … Q … Z`) translated by :dx/:dy — flames, tails, anything curved
+    :path    (do (.save ctx) (.translate ctx (:dx o 0) (:dy o 0))
+                 (let [p (path2d (:d o))]
+                   (when-let [f (:fill o)] (set! (.-fillStyle ctx) (css f)) (.fill ctx p))
+                   (when-let [s (:stroke o)]
+                     (set! (.-strokeStyle ctx) (css s)) (set! (.-lineWidth ctx) (:w o 4))
+                     (set! (.-lineJoin ctx) "round") (set! (.-lineCap ctx) "round")
+                     (.stroke ctx p)))
+                 (.restore ctx))
+    (draw-shape-v1! ctx kind o))
+    (when a (.restore ctx))))
+
+(defn- draw-shape-v1!
+  "The original five primitives, unchanged."
   [ctx kind o]
   (case kind
     :circle  (do (set! (.-fillStyle ctx) (css (:fill o)))
@@ -118,6 +186,11 @@
       (when (:pulse an) (let [s (+ 1 (w (:pulse an)))] (.scale ctx s s)))
       (when (:bob an)   (.translate ctx 0 (w (:bob an))))
       (when (:sway an)  (.translate ctx (w (:sway an)) 0))
+      ;; vertical-only scale: breathing, flames licking upward
+      (when (:squash an) (.scale ctx 1 (max 0.05 (+ 1 (w (:squash an))))))
+      ;; [period dur]: closed (y-scale 0.12) for `dur` seconds of every `period` — eyes
+      (when-let [[period dur] (:blink an)]
+        (when (< (mod (+ tick ph) period) dur) (.scale ctx 1 0.12)))
       (.translate ctx (- px) (- py))
       (draw-shape! ctx kind o)
       (.restore ctx))
@@ -127,12 +200,17 @@
   "Draw a sprite (vector of prims) centred at screen (sx,sy), scaled by k (with a soft shadow).
    `tick` drives any per-part `:anim`; `ph` desyncs identical sprites. The 5-arg form is static."
   ([ctx sprite sx sy k] (draw-sprite! ctx sprite sx sy k 0 0))
-  ([ctx sprite sx sy k tick ph]
+  ([ctx sprite sx sy k tick ph] (draw-sprite! ctx sprite sx sy k tick ph nil))
+  ;; opts: {:shadow? false} for things that do not stand on ground (wisps, flyers, HUD art);
+  ;;       {:rot r} rotates the whole sprite about its centre.
+  ([ctx sprite sx sy k tick ph opts]
    (.save ctx)
    (.translate ctx sx sy)
    ;; ground shadow
-   (set! (.-fillStyle ctx) "rgba(0,0,0,.22)")
-   (.beginPath ctx) (.ellipse ctx 0 (* 260 k) (* 230 k) (* 70 k) 0 0 (* 2 js/Math.PI)) (.fill ctx)
+   (when-not (false? (:shadow? opts))
+     (set! (.-fillStyle ctx) "rgba(0,0,0,.22)")
+     (.beginPath ctx) (.ellipse ctx 0 (* 260 k) (* 230 k) (* 70 k) 0 0 (* 2 js/Math.PI)) (.fill ctx))
+   (when-let [r (:rot opts)] (.rotate ctx r))
    (.scale ctx k k)
    (doseq [p sprite] (prim! ctx p tick ph))
    (.restore ctx)))
