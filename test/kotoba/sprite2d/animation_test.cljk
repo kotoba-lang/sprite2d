@@ -1,5 +1,5 @@
 (ns kotoba.sprite2d.animation-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.sprite2d.animation :as anim]))
 
 (def loop-clip {:frames [:w0 :w1 :w2 :w3] :fps 10 :mode :loop})

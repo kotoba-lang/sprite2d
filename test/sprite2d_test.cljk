@@ -1,5 +1,5 @@
 (ns sprite2d-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.sprite2d :as sprite2d]))
 
 (deftest sprite2d-painter-is-explicitly-platform-bound
